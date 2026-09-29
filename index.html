@@ -32,7 +32,7 @@ body.idle .dock{opacity:.22;pointer-events:auto}
 @media (max-width:640px){.read .x{display:none}}
 .dock{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 14px);display:flex;align-items:center;gap:2px;padding:4px;
   background:var(--glass);border:1px solid var(--line);border-radius:999px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
-.dock button,.ib{all:unset;cursor:pointer;height:32px;min-width:32px;padding:0 10px;border-radius:999px;display:inline-grid;place-items:center;font-size:12px;color:var(--dim);transition:color .2s,background .2s;user-select:none;-webkit-user-select:none;box-sizing:border-box}
+.dock button,.ib{all:unset;white-space:nowrap;cursor:pointer;height:32px;min-width:32px;padding:0 10px;border-radius:999px;display:inline-grid;place-items:center;font-size:12px;color:var(--dim);transition:color .2s,background .2s;user-select:none;-webkit-user-select:none;box-sizing:border-box}
 .dock button[aria-pressed="true"]{color:var(--ink);background:var(--accent)}
 .dock .sep{width:1px;height:16px;background:var(--line);margin:0 4px}
 .dock svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
@@ -255,6 +255,7 @@ $dElIn.addEventListener('input', ()=>{ tEl = +$dElIn.value; patrol.checked = fal
 
 canvas.addEventListener('pointerdown', e=>{
   canvas.setPointerCapture(e.pointerId); pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  mouse.set(e.clientX/innerWidth*2-1, -(e.clientY/innerHeight)*2+1); if(e.pointerType!=='mouse') hoverT = 1;
   dishDrag = pointers.size===1 && hitsDish(e.clientX,e.clientY); if(dishDrag) patrol.checked = false;
   if(pointers.size===2){ const [a,b]=[...pointers.values()]; pinch0=Math.hypot(a.x-b.x,a.y-b.y); pinchD0=tDist; }
   dragging = true; lastX=e.clientX; lastY=e.clientY; canvas.classList.add('drag'); idleT = 0;
@@ -262,7 +263,7 @@ canvas.addEventListener('pointerdown', e=>{
 canvas.addEventListener('pointermove', e=>{
   mouse.set(e.clientX/innerWidth*2-1, -(e.clientY/innerHeight)*2+1);
   if(!dragging){ overDish = e.pointerType==='mouse' && hitsDish(e.clientX,e.clientY); canvas.style.cursor = overDish ? 'move' : ''; }
-  if(e.pointerType==='mouse') hoverT = 1;
+  if(e.pointerType==='mouse' || pointers.has(e.pointerId)) hoverT = 1;
   if(!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
   if(pointers.size===2){ const [a,b]=[...pointers.values()]; const d=Math.hypot(a.x-b.x,a.y-b.y); if(d>0) tDist = THREE.MathUtils.clamp(pinchD0*pinch0/d, 2.2, 14); return; }
@@ -274,7 +275,7 @@ canvas.addEventListener('pointermove', e=>{
   }
   if(dragging){ tYaw -= (e.clientX-lastX)*0.006; tPitch = THREE.MathUtils.clamp(tPitch + (e.clientY-lastY)*0.005, -1.2, 1.3); lastX=e.clientX; lastY=e.clientY; idleT = 0; }
 });
-function up(e){ pointers.delete(e.pointerId); if(pointers.size===0){ dragging=false; dishDrag=false; canvas.classList.remove('drag'); } }
+function up(e){ pointers.delete(e.pointerId); if(e.pointerType!=='mouse' && pointers.size===0) hoverT = 0; if(pointers.size===0){ dragging=false; dishDrag=false; canvas.classList.remove('drag'); } }
 canvas.addEventListener('pointerup', up); canvas.addEventListener('pointercancel', up);
 canvas.addEventListener('pointerleave', e=>{ if(e.pointerType==='mouse') hoverT = 0; });
 canvas.addEventListener('wheel', e=>{ e.preventDefault(); tDist = THREE.MathUtils.clamp(tDist*Math.exp(e.deltaY*0.001), 2.2, 14); idleT=0; }, {passive:false});
@@ -363,7 +364,7 @@ canvas.addEventListener('pointerdown', ()=>{ if(sheet.classList.contains('open')
 // 长按空白处 0.45 秒 = 爆散，松手收回
 let lpTimer = 0, lpX = 0, lpY = 0, lpOn = false;
 canvas.addEventListener('pointerdown', e=>{ if(dishDrag || pointers.size>1) return; lpX=e.clientX; lpY=e.clientY; clearTimeout(lpTimer); lpTimer = setTimeout(()=>{ lpOn = true; burstOn = true; }, 450); });
-canvas.addEventListener('pointermove', e=>{ if(Math.hypot(e.clientX-lpX, e.clientY-lpY) > 8) clearTimeout(lpTimer); });
+canvas.addEventListener('pointermove', e=>{ const d = Math.hypot(e.clientX-lpX, e.clientY-lpY); if(d > 6) clearTimeout(lpTimer); if(lpOn && d > 24){ lpOn = false; burstOn = false; } });
 const lpEnd = ()=>{ clearTimeout(lpTimer); if(lpOn){ lpOn = false; burstOn = false; } };
 canvas.addEventListener('pointerup', lpEnd); canvas.addEventListener('pointercancel', lpEnd);
 
