@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="可交互的雷达天线粒子点云：拖动天线盘改变指向，切换线框/全息条纹/表面点云。">
+<title>雷达天线点云</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<style>
+/* 布局：全屏 WebGL 画布 + 左上读数（像观测站控制台）+ 底部控制条。单一暗色视觉，刻意不跟随浅色主题。 */
+:root{
+  --ink:#04070c; --panel:rgba(9,16,26,.78); --line:#1b2a3b; --fg:#d3e6f4; --dim:#6d8599; --accent:#93d6ff; --hot:#ffffff;
+  --f-ui:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
+  color-scheme:dark;
+}
+html,body{height:100%}
+body{background:var(--ink);color:var(--fg);font-family:var(--f-ui);overflow:hidden}
+#stage{position:fixed;inset:0;display:block;width:100%;height:100%;touch-action:none;cursor:grab}
+#stage.drag{cursor:grabbing}
+.hud{position:fixed;top:calc(env(safe-area-inset-top,0px) + 16px);left:16px;right:16px;display:flex;justify-content:space-between;gap:16px;pointer-events:none}
+.id h1{margin:0;font-size:clamp(18px,2.4vw,24px);font-weight:700;letter-spacing:.04em;text-wrap:balance}
+.id p{margin:4px 0 0;color:var(--dim);font-size:12px;letter-spacing:.06em}
+.read{font-family:var(--f-mono);font-size:12px;color:var(--dim);display:grid;grid-template-columns:auto auto;gap:2px 12px;align-content:start;text-align:right;font-variant-numeric:tabular-nums}
+.read b{color:var(--accent);font-weight:500}
+.bar{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 16px);width:min(920px,calc(100% - 32px));
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;backdrop-filter:blur(8px);
+  display:flex;flex-wrap:wrap;align-items:center;gap:12px 20px;padding:12px 14px}
+.seg{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.seg button{all:unset;cursor:pointer;padding:7px 14px;font-size:13px;color:var(--dim);transition:color .2s,background .2s}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{color:var(--ink);background:var(--accent)}
+.seg button:focus-visible,.btn:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.ctl{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim);min-width:0}
+.ctl input[type=range]{width:110px;accent-color:var(--accent)}
+.ctl input[type=checkbox]{accent-color:var(--accent)}
+.btn{all:unset;cursor:pointer;padding:7px 14px;border:1px solid var(--accent);color:var(--accent);border-radius:7px;font-size:13px;user-select:none;-webkit-user-select:none}
+.btn.on{background:var(--accent);color:var(--ink)}
+.bgm{gap:8px}.bgm .name{max-width:12em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg)}.bgm input[type=range]{width:80px}
+.btn:disabled{opacity:.4;cursor:default}
+.hint{font-size:12px;color:var(--dim);margin-left:auto}
+#load{position:fixed;inset:0;display:grid;place-items:center;font-family:var(--f-mono);font-size:13px;color:var(--dim);letter-spacing:.08em;pointer-events:none}
+@media (max-width:1400px){.hint{display:none}}
+@media (max-width:640px){.ctl input[type=range]{width:84px}.read{font-size:11px}}
+</style>
+<style>*,*::before,*::after{box-sizing:border-box}body{margin:0}[hidden]{display:none!important}</style>
+</head>
+<body>
+
+
+<canvas id="stage" aria-label="可交互的雷达天线点云"></canvas>
+<div class="hud">
+  <div class="id"><h1>雷达天线点云</h1><p>SATELLITE DISH · 262,144 PTS</p></div>
+  <div class="read" aria-live="off">
+    <span>天线方位 AZ</span><b id="daz">000.0°</b>
+    <span>天线俯仰 EL</span><b id="del">+00.0°</b>
+    <span>视角</span><b id="az">000.0°</b>
+    <span>距离</span><b id="rg">0.00</b>
+    <span>FPS</span><b id="fps">--</b>
+  </div>
+</div>
+<div id="load">载入点云 0%</div>
+<div class="bar">
+  <div class="seg" role="group" aria-label="点云类型">
+    <button id="m-edges" aria-pressed="true">线框</button>
+    <button id="m-slices" aria-pressed="false">全息条纹</button>
+    <button id="m-surface" aria-pressed="false">表面点云</button>
+  </div>
+  <label class="ctl" for="dAz">天线方位 <input id="dAz" type="range" min="0" max="360" step="0.5" value="115"></label>
+  <label class="ctl" for="dEl">天线俯仰 <input id="dEl" type="range" min="5" max="90" step="0.5" value="35"></label>
+  <label class="ctl" for="patrol"><input id="patrol" type="checkbox"> 自动巡航</label>
+  <label class="ctl" for="size">点大小 <input id="size" type="range" min="0.4" max="3" step="0.05" value="1.25"></label>
+  <label class="ctl" for="bright">亮度 <input id="bright" type="range" min="0.2" max="2.5" step="0.05" value="2.5"></label>
+  <label class="ctl" for="scan"><input id="scan" type="checkbox" checked> 扫描线</label>
+  <label class="ctl" for="spin"><input id="spin" type="checkbox" checked> 自动旋转</label>
+  <button class="btn" id="burst">按住爆散</button>
+  <div class="ctl bgm">
+    <label class="btn" for="bgmFile">换音乐</label><input id="bgmFile" type="file" accept="audio/*" hidden>
+    <button class="btn" id="bgmPlay" disabled>播放</button>
+    <span id="bgmName" class="name">载入中</span>
+    <input id="bgmVol" type="range" min="0" max="1" step="0.01" value="0.2" aria-label="音量">
+  </div>
+  <span class="hint">拖动天线盘改变指向 · 拖动空白处旋转视角 · 滚轮缩放 · 1/2/3 切换</span>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script>
+(async function(){
+const N = 262144;
+const LO = [-0.9187617301940918, -1.0, -0.9183828830718994], HI = [0.9189175963401794, 0.9995458722114563, 0.9183828830718994];
+const MODES = ['edges','slices','surface'];
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const loadEl = document.getElementById('load');
+
+// ---------- 读取点数据 ----------
+const files = ['edges.txt','slices.txt','surface.txt','surface_col.txt','part_edges.txt','part_slices.txt','part_surface.txt'];
+const raw = [N*6,N*6,N*6,N*3,N,N,N], total = raw.map(n=>Math.ceil(n/3)*4), loaded = new Array(files.length).fill(0);
+function b64(s){ const bin = atob(s.trim()); const u = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u[i]=bin.charCodeAt(i); return u.buffer; }
+async function get(i){
+  const r = await fetch(files[i]); if(!r.ok) throw new Error(files[i]);
+  const rd = r.body.getReader(); const parts = []; let o = 0;
+  for(;;){ const {done,value} = await rd.read(); if(done) break; parts.push(value); o += value.length; loaded[i]=o;
+    loadEl.textContent = '载入点云 ' + Math.min(100, Math.round(loaded.reduce((a,b)=>a+b)/total.reduce((a,b)=>a+b)*100)) + '%'; }
+  const all = new Uint8Array(o); let k = 0; for(const p of parts){ all.set(p,k); k += p.length; }
+  return b64(new TextDecoder().decode(all));
+}
+let bufs;
+try { bufs = await Promise.all(files.map((_,i)=>get(i))); }
+catch(e){ loadEl.textContent = '点云数据载入失败，请刷新页面重试'; return; }
+loadEl.remove();
+const POS = {edges:new Uint16Array(bufs[0]), slices:new Uint16Array(bufs[1]), surface:new Uint16Array(bufs[2])};
+const COL = new Uint8Array(bufs[3]);
+const PART = {edges:new Uint8Array(bufs[4]), slices:new Uint8Array(bufs[5]), surface:new Uint8Array(bufs[6])};
+
+// ---------- three.js ----------
+const canvas = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:false, powerPreference:'high-performance'});
+const PR = Math.min(devicePixelRatio||1, 2);
+renderer.setPixelRatio(PR); renderer.setClearColor(0x04070c,1);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, 1, 0.05, 50);
+
+const geo = new THREE.BufferGeometry();
+const aA = new THREE.BufferAttribute(POS.edges.slice(), 3, true);
+const aB = new THREE.BufferAttribute(POS.edges.slice(), 3, true);
+geo.setAttribute('position', aA); geo.setAttribute('aB', aB);
+const pA = new THREE.BufferAttribute(PART.edges.slice(), 1, false), pB = new THREE.BufferAttribute(PART.edges.slice(), 1, false);
+geo.setAttribute('aPA', pA); geo.setAttribute('aPB', pB);
+geo.setAttribute('aCol', new THREE.BufferAttribute(COL, 3, true));
+const rnd = new Float32Array(N*4); for(let i=0;i<rnd.length;i++) rnd[i]=Math.random();
+geo.setAttribute('aRnd', new THREE.BufferAttribute(rnd, 4));
+geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 2.5);
+
+const U = {
+  uLo:{value:new THREE.Vector3(...LO)}, uHi:{value:new THREE.Vector3(...HI)},
+  uMix:{value:1}, uColA:{value:0}, uColB:{value:0},
+  uTime:{value:0}, uSize:{value:1.25}, uBright:{value:2.5}, uPR:{value:PR}, uScale:{value:1},
+  uExplode:{value:0}, uScanOn:{value:1},
+  uAz:{value:0}, uTilt:{value:0}, uPivot:{value:new THREE.Vector3(0,-0.2406,0)}, uDishGlow:{value:0}, uBeat:{value:0},
+  uRayO:{value:new THREE.Vector3()}, uRayD:{value:new THREE.Vector3(0,0,-1)}, uHover:{value:0},
+  uTint:{value:new THREE.Color(0.58,0.78,1.0)}
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms:U, transparent:true, depthWrite:false, depthTest:false, blending:THREE.AdditiveBlending,
+  vertexShader:`
+    attribute vec3 aB; attribute vec3 aCol; attribute vec4 aRnd; attribute float aPA; attribute float aPB;
+    uniform float uAz,uTilt,uDishGlow,uBeat; uniform vec3 uPivot;
+    // 0 底座、1 中间支架（含梯子）都固定；只有 2 天线接收器转动：先绕俯仰轴(X)倾斜，再绕竖轴转方位
+    vec3 rig(vec3 p, float part){
+      if(part>1.5){
+        vec3 q=p-uPivot; float c=cos(uTilt), s=sin(uTilt); q=vec3(q.x, c*q.y-s*q.z, s*q.y+c*q.z);
+        c=cos(uAz); s=sin(uAz); q=vec3(c*q.x+s*q.z, q.y, -s*q.x+c*q.z); p=q+uPivot;
+      }
+      return p;
+    }
+    uniform vec3 uLo,uHi,uRayO,uRayD,uTint; uniform float uMix,uColA,uColB,uTime,uSize,uBright,uPR,uScale,uExplode,uScanOn,uHover;
+    varying vec3 vC; varying float vA;
+    void main(){
+      vec3 A = rig(uLo + position*(uHi-uLo), aPA), B = rig(uLo + aB*(uHi-uLo), aPB);
+      // 每个点错开出发，路径中途向外甩出
+      float t = clamp((uMix - aRnd.x*0.35)/0.65, 0.0, 1.0); t = t*t*(3.0-2.0*t);
+      vec3 dir = normalize(aRnd.yzw - 0.5 + 1e-4);
+      vec3 p = mix(A,B,t) + dir*sin(t*3.14159)*(0.25+aRnd.x*0.5);
+      // 爆散
+      p += dir * uExplode * (0.6 + 1.6*aRnd.y) + vec3(0.0, uExplode*0.3*aRnd.z, 0.0);
+      // 细微闪烁
+      p += dir * 0.004 * sin(uTime*2.0 + aRnd.x*40.0);
+      p += dir * uBeat * 0.03 * aRnd.w;
+      // 鼠标拨开：点到视线射线的距离
+      vec3 w = p - uRayO; float s = dot(w,uRayD); vec3 cp = uRayO + uRayD*s; vec3 off = p - cp; float d = length(off);
+      p += (off/(d+1e-4)) * uHover * 0.22 * exp(-d*d/0.03);
+      // 扫描线
+      float scanY = mod(uTime*0.35, 2.8) - 1.4;
+      float scan = uScanOn * exp(-pow((p.y-scanY)/0.025, 2.0));
+      vec3 base = mix(uTint, aCol*1.4 + uTint*0.25, mix(uColA,uColB,t));
+      vC = base * (0.55 + 2.5*scan) + vec3(scan*0.6);
+      float isDish = mix(step(1.5,aPA), step(1.5,aPB), t);
+      vC *= 1.0 + uDishGlow*0.9*isDish + uBeat*1.6;
+      vA = uBright;
+      vec4 mv = modelViewMatrix * vec4(p,1.0);
+      gl_PointSize = uSize * uPR * uScale * (1.0 + scan*1.5) / -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader:`
+    varying vec3 vC; varying float vA;
+    void main(){
+      vec2 q = gl_PointCoord*2.0-1.0; float r2 = dot(q,q); if(r2>1.0) discard;
+      float a = exp(-r2*4.0);
+      gl_FragColor = vec4(vC * a * vA * 0.26, 1.0);
+    }`
+});
+const pts = new THREE.Points(geo, mat); scene.add(pts);
+
+// ---------- 后期发光 ----------
+let composer = null, bloom = null;
+if (THREE.EffectComposer && THREE.UnrealBloomPass){
+  composer = new THREE.EffectComposer(renderer);
+  composer.addPass(new THREE.RenderPass(scene,camera));
+  bloom = new THREE.UnrealBloomPass(new THREE.Vector2(1,1), 0.9, 0.55, 0.12);
+  composer.addPass(bloom);
+}
+
+function resize(){
+  const w = innerWidth, h = innerHeight; if(!w || !h) return;
+  renderer.setSize(w,h,false); camera.aspect = w/h; camera.updateProjectionMatrix();
+  U.uScale.value = h * 0.0042;
+  if(composer){ composer.setPixelRatio(PR); composer.setSize(w,h); }
+}
+addEventListener('resize', resize); resize();
+
+// ---------- 轨道相机 ----------
+const fitDist = ()=>{ const w = innerWidth||1, h = innerHeight||1, d = 1.7/(0.344*w/h); return Number.isFinite(d) ? Math.min(14, Math.max(6.0, d)) : 6.0; };
+let yaw = 0.6, pitch = 0.12, dist = fitDist(), tYaw = yaw, tPitch = pitch, tDist = dist;
+let dragging = false, lastX = 0, lastY = 0, idleT = 0;
+const pointers = new Map(); let pinch0 = 0, pinchD0 = 0;
+const mouse = new THREE.Vector2(9,9); let hoverT = 0;
+// ---------- 天线指向 ----------
+let dAz = 115, dEl = 35, tAz = dAz, tEl = dEl, dishDrag = false, overDish = false, dishGlow = 0;
+const $dAzIn = document.getElementById('dAz'), $dElIn = document.getElementById('dEl'), patrol = document.getElementById('patrol');
+const DEG = Math.PI/180;
+function dishCenter(){ // 盘面中心随当前姿态变换，用于点击判定
+  const PY = -0.2406, h = 0.28 - PY, a = (90-dEl)*DEG;
+  const q = new THREE.Vector3(0, PY + Math.cos(a)*h, Math.sin(a)*h);
+  const ca = Math.cos(dAz*DEG), sa = Math.sin(dAz*DEG);
+  return new THREE.Vector3(ca*q.x+sa*q.z, q.y, -sa*q.x+ca*q.z);
+}
+const pickRay = new THREE.Raycaster(), pickSphere = new THREE.Sphere(new THREE.Vector3(), 0.85);
+function hitsDish(x,y){
+  pickRay.setFromCamera(new THREE.Vector2(x/innerWidth*2-1, -(y/innerHeight)*2+1), camera);
+  pickSphere.center.copy(dishCenter()); return pickRay.ray.intersectsSphere(pickSphere);
+}
+$dAzIn.addEventListener('input', ()=>{ tAz = +$dAzIn.value; patrol.checked = false; });
+$dElIn.addEventListener('input', ()=>{ tEl = +$dElIn.value; patrol.checked = false; });
+
+canvas.addEventListener('pointerdown', e=>{
+  canvas.setPointerCapture(e.pointerId); pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  dishDrag = pointers.size===1 && hitsDish(e.clientX,e.clientY); if(dishDrag) patrol.checked = false;
+  if(pointers.size===2){ const [a,b]=[...pointers.values()]; pinch0=Math.hypot(a.x-b.x,a.y-b.y); pinchD0=tDist; }
+  dragging = true; lastX=e.clientX; lastY=e.clientY; canvas.classList.add('drag'); idleT = 0;
+});
+canvas.addEventListener('pointermove', e=>{
+  mouse.set(e.clientX/innerWidth*2-1, -(e.clientY/innerHeight)*2+1);
+  if(!dragging){ overDish = e.pointerType==='mouse' && hitsDish(e.clientX,e.clientY); canvas.style.cursor = overDish ? 'move' : ''; }
+  if(e.pointerType==='mouse') hoverT = 1;
+  if(!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(pointers.size===2){ const [a,b]=[...pointers.values()]; const d=Math.hypot(a.x-b.x,a.y-b.y); if(d>0) tDist = THREE.MathUtils.clamp(pinchD0*pinch0/d, 2.2, 14); return; }
+  if(dragging && dishDrag){
+    // 横向拖：方位；纵向拖：俯仰（向上拖=抬高）。方向随相机视角修正，拖动手感跟屏幕一致
+    tAz = ((tAz - (e.clientX-lastX)*0.35) % 360 + 360) % 360;
+    tEl = THREE.MathUtils.clamp(tEl - (e.clientY-lastY)*0.3, 5, 90);
+    $dAzIn.value = tAz; $dElIn.value = tEl; lastX=e.clientX; lastY=e.clientY; idleT = 0; return;
+  }
+  if(dragging){ tYaw -= (e.clientX-lastX)*0.006; tPitch = THREE.MathUtils.clamp(tPitch + (e.clientY-lastY)*0.005, -1.2, 1.3); lastX=e.clientX; lastY=e.clientY; idleT = 0; }
+});
+function up(e){ pointers.delete(e.pointerId); if(pointers.size===0){ dragging=false; dishDrag=false; canvas.classList.remove('drag'); } }
+canvas.addEventListener('pointerup', up); canvas.addEventListener('pointercancel', up);
+canvas.addEventListener('pointerleave', e=>{ if(e.pointerType==='mouse') hoverT = 0; });
+canvas.addEventListener('wheel', e=>{ e.preventDefault(); tDist = THREE.MathUtils.clamp(tDist*Math.exp(e.deltaY*0.001), 2.2, 14); idleT=0; }, {passive:false});
+
+// ---------- 控件 ----------
+let mode = 'edges', mixT = 1;
+const modeBtns = Object.fromEntries(MODES.map(m=>[m, document.getElementById('m-'+m)]));
+function setMode(m){
+  if(m===mode) return;
+  // 以当前（可能还在飞行中的）目标为新的起点
+  aA.array.set(POS[mode]); aA.needsUpdate = true;
+  aB.array.set(POS[m]); aB.needsUpdate = true;
+  pA.array.set(PART[mode]); pA.needsUpdate = true; pB.array.set(PART[m]); pB.needsUpdate = true;
+  U.uColA.value = mode==='surface'?1:0; U.uColB.value = m==='surface'?1:0;
+  mode = m; mixT = 0; U.uMix.value = 0;
+  for(const k of MODES) modeBtns[k].setAttribute('aria-pressed', String(k===m));
+}
+MODES.forEach(m=>modeBtns[m].addEventListener('click', ()=>setMode(m)));
+addEventListener('keydown', e=>{ const i = '123'.indexOf(e.key); if(i>=0) setMode(MODES[i]); });
+const size = document.getElementById('size'), bright = document.getElementById('bright');
+const scan = document.getElementById('scan'), spin = document.getElementById('spin');
+size.addEventListener('input', ()=>U.uSize.value = +size.value);
+bright.addEventListener('input', ()=>U.uBright.value = +bright.value);
+scan.addEventListener('change', ()=>U.uScanOn.value = scan.checked?1:0);
+if(reduceMotion){ spin.checked = false; }
+let burstOn = false, explode = 0;
+const burst = document.getElementById('burst');
+const bOn = e=>{ e.preventDefault(); burstOn = true; burst.classList.add('on'); };
+const bOff = ()=>{ burstOn = false; burst.classList.remove('on'); };
+burst.addEventListener('pointerdown', bOn); burst.addEventListener('pointerup', bOff); burst.addEventListener('pointerleave', bOff);
+burst.addEventListener('keydown', e=>{ if(e.key===' '||e.key==='Enter') bOn(e); });
+burst.addEventListener('keyup', e=>{ if(e.key===' '||e.key==='Enter') bOff(); });
+
+// ---------- 背景音乐：播放你自己电脑上的音乐文件（只在本机浏览器里播放，不会上传） ----------
+const BGM = (()=>{
+  const audio = new Audio(); audio.loop = true; audio.volume = 0.2;
+  let ctx = null, an = null, bins = null, level = 0;
+  const DB = 'radar-bgm';
+  function idb(){ return new Promise((res,rej)=>{ const r = indexedDB.open(DB,1); r.onupgradeneeded = ()=>r.result.createObjectStore('f'); r.onsuccess = ()=>res(r.result); r.onerror = ()=>rej(r.error); }); }
+  async function save(file){ try{ const db = await idb(); db.transaction('f','readwrite').objectStore('f').put(file,'bgm'); }catch(e){} }
+  async function restore(){ try{ const db = await idb(); return await new Promise(res=>{ const q = db.transaction('f').objectStore('f').get('bgm'); q.onsuccess = ()=>res(q.result||null); q.onerror = ()=>res(null); }); }catch(e){ return null; } }
+  function graph(){
+    if(ctx) return; ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const src = ctx.createMediaElementSource(audio); an = ctx.createAnalyser(); an.fftSize = 256; an.smoothingTimeConstant = 0.8;
+    bins = new Uint8Array(an.frequencyBinCount); src.connect(an); an.connect(ctx.destination);
+  }
+  return {
+    audio,
+    load(file){ if(audio.src) URL.revokeObjectURL(audio.src); audio.src = URL.createObjectURL(file); save(file); },
+    restore,
+    async play(){ graph(); if(ctx.state!=='running') await ctx.resume(); await audio.play(); },
+    pause(){ audio.pause(); },
+    // 低频能量 0..1，用来让粒子跟着节奏呼吸
+    level(){ if(!an || audio.paused) return level *= 0.9; an.getByteFrequencyData(bins); let s=0; for(let i=1;i<12;i++) s+=bins[i]; const v = s/(11*255); level += (v-level)*0.35; return level; }
+  };
+})();
+const bgmFile = document.getElementById('bgmFile'), bgmBtn = document.getElementById('bgmPlay'), bgmName = document.getElementById('bgmName'), bgmVol = document.getElementById('bgmVol');
+function bgmUI(){ const on = !BGM.audio.paused; bgmBtn.textContent = on ? '暂停' : '播放'; bgmBtn.classList.toggle('on', on); bgmBtn.disabled = !BGM.audio.src; }
+bgmFile.addEventListener('change', async ()=>{ const f = bgmFile.files[0]; if(!f) return; BGM.load(f); bgmName.textContent = f.name.replace(/\.[^.]+$/,''); try{ await BGM.play(); }catch(e){} bgmUI(); });
+bgmBtn.addEventListener('click', async ()=>{ if(BGM.audio.paused){ userPaused = false; try{ await BGM.play(); }catch(e){} } else { userPaused = true; BGM.pause(); } bgmUI(); });
+bgmVol.addEventListener('input', ()=>{ BGM.audio.volume = +bgmVol.value; });
+BGM.restore().then(f=>{
+  if(f){ BGM.load(f); bgmName.textContent = (f.name||'上次的音乐').replace(/\.[^.]+$/,''); }
+  else { BGM.audio.src = 'bgm.mp3'; bgmName.textContent = 'Floating in Space'; bgmName.title = 'Umplix · CC0 公共领域，OpenGameArt'; }
+  bgmUI();
+});
+// 一直播放：打开就尝试播放；浏览器拦截时，第一次点击/按键/触摸页面任意位置就开始
+let userPaused = false;
+async function kick(){ if(userPaused || !BGM.audio.src || !BGM.audio.paused) return; try{ await BGM.play(); }catch(err){} bgmUI(); }
+setTimeout(kick, 300);
+for(const ev of ['pointerdown','keydown','touchstart']) addEventListener(ev, e=>{ if(!(e.target.closest && e.target.closest('#bgmPlay'))) kick(); }, true);
+// 被系统或其他页面打断后，回到页面时自动续上
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) kick(); });
+BGM.audio.addEventListener('pause', ()=>{ setTimeout(()=>{ if(!userPaused && !document.hidden) kick(); }, 500); });
+let prevAz = 115, prevEl = 35;
+
+// ---------- 主循环 ----------
+const $daz = document.getElementById('daz'), $del = document.getElementById('del');
+const $az = document.getElementById('az'), $el = {set textContent(v){}}, $rg = document.getElementById('rg'), $fps = document.getElementById('fps');
+const ray = new THREE.Raycaster(); const clock = new THREE.Clock();
+let fpsAcc = 0, fpsN = 0, hover = 0;
+function frame(){
+  const dt = Math.min(clock.getDelta(), 0.05); idleT += dt;
+  U.uTime.value += reduceMotion ? dt*0.3 : dt;
+  if(spin.checked) tYaw += dt*0.18;
+  if(innerWidth && innerHeight && (canvas.width !== Math.floor(innerWidth*PR) || canvas.height !== Math.floor(innerHeight*PR))) resize();
+  if(!Number.isFinite(tDist)) tDist = fitDist(); if(!Number.isFinite(dist)) dist = tDist;
+  yaw += (tYaw-yaw)*Math.min(1,dt*8); pitch += (tPitch-pitch)*Math.min(1,dt*8); dist += (tDist-dist)*Math.min(1,dt*6);
+  camera.position.set(Math.sin(yaw)*Math.cos(pitch)*dist, Math.sin(pitch)*dist, Math.cos(yaw)*Math.cos(pitch)*dist);
+  camera.lookAt(0,-0.3,0);
+  if(patrol.checked){ tAz = (tAz + dt*12) % 360; tEl = 38 + 22*Math.sin(U.uTime.value*0.25); $dAzIn.value = tAz; $dElIn.value = tEl; }
+  let dA = ((tAz - dAz + 540) % 360) - 180; dAz = (dAz + dA*Math.min(1,dt*6) + 360) % 360; dEl += (tEl-dEl)*Math.min(1,dt*6);
+  U.uAz.value = dAz*DEG; U.uTilt.value = (90-dEl)*DEG;
+  U.uBeat.value = BGM.level();
+  dishGlow += (((dishDrag||overDish)?1:0) - dishGlow)*Math.min(1,dt*8); U.uDishGlow.value = dishGlow;
+  if(mixT < 1){ mixT = Math.min(1, mixT + dt/(reduceMotion?0.6:1.8)); U.uMix.value = mixT; }
+  explode += ((burstOn?1:0) - explode) * Math.min(1, dt*(burstOn?3:2.2)); U.uExplode.value = explode;
+  hover += (hoverT - hover) * Math.min(1, dt*6); U.uHover.value = hover;
+  ray.setFromCamera(mouse, camera); U.uRayO.value.copy(ray.ray.origin); U.uRayD.value.copy(ray.ray.direction);
+  if(composer) composer.render(); else renderer.render(scene,camera);
+  fpsAcc += dt; fpsN++;
+  if(fpsAcc > 0.5){
+    $fps.textContent = String(Math.round(fpsN/fpsAcc)); fpsAcc = 0; fpsN = 0;
+    const az = ((yaw*180/Math.PI)%360+360)%360, el = pitch*180/Math.PI;
+    $az.textContent = az.toFixed(1).padStart(5,'0') + '°';
+    $el.textContent = (el>=0?'+':'-') + Math.abs(el).toFixed(1).padStart(4,'0') + '°';
+    $rg.textContent = dist.toFixed(2);
+    $daz.textContent = dAz.toFixed(1).padStart(5,'0') + '°'; $del.textContent = '+' + dEl.toFixed(1).padStart(4,'0') + '°';
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
